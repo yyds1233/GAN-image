@@ -111,6 +111,13 @@ class AdvGAN_Attack:
         # optimize D
         for i in range(self.n_steps_D):
             perturbation = self.G(x)
+            if perturbation.shape[-2:] != x.shape[-2:]:
+                perturbation = torch.nn.functional.interpolate(
+                    perturbation,
+                    size=x.shape[-2:],
+                    mode='bilinear',
+                    align_corners=False
+                )
 
             adv_images = torch.clamp(perturbation, -self.l_inf_bound, self.l_inf_bound) + x
             adv_images = torch.clamp(adv_images, 0, 1)

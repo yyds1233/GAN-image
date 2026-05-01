@@ -1,1 +1,4 @@
 .DS_Store
+src/checkpoints/
+src/__pycache__/
+src/npy/

@@ -12,6 +12,8 @@ import sys
 import time
 
 import tensorflow as tf
+# Disable eager execution for TensorFlow 2.x to use tf.compat.v1 Session API
+tf.compat.v1.disable_eager_execution()
 
 import numpy as np
 
@@ -21,7 +23,7 @@ from model import Model
 
 def run_attack(checkpoint, img, x_adv, labels, pred_labels, epsilon):
   model = Model()
-  saver = tf.train.Saver()
+  saver = tf.compat.v1.train.Saver()
 
   num_eval_examples = 10000
   eval_batch_size = 64
@@ -36,7 +38,7 @@ def run_attack(checkpoint, img, x_adv, labels, pred_labels, epsilon):
   y_pred = []
   total_corr = 0
 
-  with tf.Session() as sess:
+  with tf.compat.v1.Session() as sess:
     saver.restore(sess, checkpoint)
 
     # Iterate over the samples batch-by-batch
@@ -73,7 +75,7 @@ if __name__ == '__main__':
 
 
   model_dir = config['model_dir']
-  checkpoint = tf.train.latest_checkpoint(model_dir)
+  checkpoint = tf.compat.v1.train.latest_checkpoint(model_dir)
 
   if checkpoint is None:
     raise Exception('No checkpoint found.')

@@ -78,7 +78,7 @@ print('CUDA Available: ', torch.cuda.is_available())
 device = torch.device('cuda' if (use_cuda and torch.cuda.is_available()) else 'cpu')
 
 
-model = models.inception_v3(pretrained=True)#.to(device)
+model = models.inception_v3(weights='DEFAULT')#.to(device)
 model.eval()
 
 transform = transforms.Compose([

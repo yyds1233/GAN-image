@@ -9,9 +9,9 @@
 
 	"comment" : "Settings for AdvGAN", 
 
-	"AdvGAN_epochs" : 60, 
+	"AdvGAN_epochs" : 15, 
 	"AdvGAN_learning_rate" : 0.001, 
-	"maximum_perturbation_allowed" : "Auto", 
+	"maximum_perturbation_allowed" : 0.05, 
 	"alpha" : 5, 
 	"beta" : 1, 
 	"gamma" : 1, 

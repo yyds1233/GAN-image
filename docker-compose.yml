@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  advgan:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: advgan:latest
+    container_name: advgan_container
+    # GPU 支持
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      # 挂载项目目录（可选，用于开发）
+      - .:/app
+      # 挂载数据目录（如果需要）
+      - ./data:/app/data
+      # 挂载输出目录
+      - ./output:/app/output
+    working_dir: /app
+    stdin_open: true
+    tty: true

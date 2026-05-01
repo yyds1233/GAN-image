@@ -125,7 +125,7 @@ def init_params(target):
         n_labels = 1000
         n_channels = 3
 
-        target_model = m.inception_v3(pretrained=True).to(device)
+        target_model = m.inception_v3(weights='DEFAULT').to(device)
         target_model.eval()
 
         transform = transforms.Compose([
