@@ -2,3 +2,8 @@
 src/checkpoints/
 src/__pycache__/
 src/npy/
+seed/20260502.zip
+weight/inception_v3_google-0cc3c7bd.pth
+weight/20260502.zip
+src/core
+
