@@ -1,10 +1,11 @@
 # Adversarial Attacks with AdvGAN and AdvRaGAN
-# Modified from https://github.com/mathcbc/advGAN_pytorch/blob/master/advGAN.py
+# Modified from https://github. :contentReference[oaicite:0]{index=0}/advGAN.py
 
 import matplotlib
 matplotlib.use("Agg")
 
 import os
+
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
@@ -13,12 +14,29 @@ import torch.nn.functional as F
 import models
 
 
+def unpack_images_labels(data):
+    """
+    Compatible with dataloader batches shaped as:
+    1. images, labels
+    2. images, labels, filenames
+
+    Training only needs images and labels. Extra fields such as filenames are ignored.
+    """
+    if isinstance(data, (list, tuple)) and len(data) >= 2:
+        return data[0], data[1]
+
+    raise ValueError(
+        "Expected dataloader batch to contain at least images and labels."
+    )
+
+
 def init_weights(m):
     """Custom weights initialization called on G and D."""
     classname = m.__class__.__name__
 
     if classname.find("Conv") != -1:
         nn.init.normal_(m.weight.data, 0.0, 0.02)
+
     elif classname.find("BatchNorm") != -1:
         nn.init.normal_(m.weight.data, 1.0, 0.02)
         nn.init.constant_(m.bias.data, 0)
@@ -59,7 +77,6 @@ class AdvGAN_Attack:
         self.n_steps_D = n_steps_D
         self.n_steps_G = n_steps_G
         self.is_relativistic = is_relativistic
-
         self.checkpoint_dir = checkpoint_dir
         self.loss_dir = loss_dir
 
@@ -88,7 +105,12 @@ class AdvGAN_Attack:
                 align_corners=False
             )
 
-        adv_images = torch.clamp(perturbation, -self.l_inf_bound, self.l_inf_bound) + x
+        adv_images = torch.clamp(
+            perturbation,
+            -self.l_inf_bound,
+            self.l_inf_bound
+        ) + x
+
         adv_images = torch.clamp(adv_images, 0, 1)
 
         return perturbation, adv_images
@@ -108,9 +130,14 @@ class AdvGAN_Attack:
             real = torch.ones_like(pred_real, device=self.device)
 
             if self.is_relativistic:
-                loss_D_real = torch.mean((logits_real - torch.mean(logits_fake) - real) ** 2)
-                loss_D_fake = torch.mean((logits_fake - torch.mean(logits_real) + real) ** 2)
+                loss_D_real = torch.mean(
+                    (logits_real - torch.mean(logits_fake) - real) ** 2
+                )
+                loss_D_fake = torch.mean(
+                    (logits_fake - torch.mean(logits_real) + real) ** 2
+                )
                 loss_D = (loss_D_fake + loss_D_real) / 2
+
             else:
                 loss_D_real = F.mse_loss(
                     pred_real,
@@ -124,6 +151,7 @@ class AdvGAN_Attack:
 
             loss_D.backward()
             self.optimizer_D.step()
+
             last_loss_D = loss_D.item()
 
         last_loss_G = 0.0
@@ -138,8 +166,13 @@ class AdvGAN_Attack:
             perturbation, adv_images = self._build_adv_images(x)
 
             perturbation_norm = torch.mean(
-                torch.norm(perturbation.view(perturbation.shape[0], -1), 2, dim=1)
+                torch.norm(
+                    perturbation.view(perturbation.shape[0], -1),
+                    2,
+                    dim=1
+                )
             )
+
             loss_hinge = torch.max(
                 torch.zeros(1, device=self.device),
                 perturbation_norm - self.c
@@ -151,6 +184,7 @@ class AdvGAN_Attack:
             onehot_labels = torch.eye(self.n_labels, device=self.device)[labels]
 
             real_class_prob = torch.sum(onehot_labels * probs_model, dim=1)
+
             target_class_prob, _ = torch.max(
                 (1 - onehot_labels) * probs_model - onehot_labels * 10000,
                 dim=1
@@ -168,16 +202,25 @@ class AdvGAN_Attack:
             real = torch.ones_like(pred_real, device=self.device)
 
             if self.is_relativistic:
-                loss_G_real = torch.mean((logits_real - torch.mean(logits_fake) + real) ** 2)
-                loss_G_fake = torch.mean((logits_fake - torch.mean(logits_real) - real) ** 2)
+                loss_G_real = torch.mean(
+                    (logits_real - torch.mean(logits_fake) + real) ** 2
+                )
+                loss_G_fake = torch.mean(
+                    (logits_fake - torch.mean(logits_real) - real) ** 2
+                )
                 loss_G_gan = (loss_G_real + loss_G_fake) / 2
+
             else:
                 loss_G_gan = F.mse_loss(
                     pred_fake,
                     torch.ones_like(pred_fake, device=self.device)
                 )
 
-            loss_G = self.gamma * loss_adv + self.alpha * loss_G_gan + self.beta * loss_hinge
+            loss_G = (
+                self.gamma * loss_adv
+                + self.alpha * loss_G_gan
+                + self.beta * loss_hinge
+            )
 
             loss_G.backward()
             self.optimizer_G.step()
@@ -201,7 +244,57 @@ class AdvGAN_Attack:
         plt.savefig(os.path.join(self.loss_dir, filename))
         plt.close()
 
-    def train(self, train_dataloader, epochs):
+    def _write_poll_txt(
+        self,
+        poll_txt,
+        epoch,
+        epoch_loss_D,
+        epoch_loss_G,
+        epoch_loss_adv,
+        epoch_loss_G_gan,
+        epoch_loss_hinge
+    ):
+        if not poll_txt:
+            return
+
+        poll_dir = os.path.dirname(poll_txt)
+        if poll_dir:
+            os.makedirs(poll_dir, exist_ok=True)
+
+        content = (
+            f"Epoch {epoch}:\n"
+            f"Loss D: {epoch_loss_D},\n"
+            f"Loss G: {epoch_loss_G},\n"
+            f"\t-Loss Adv: {epoch_loss_adv},\n"
+            f"\t-Loss G GAN: {epoch_loss_G_gan},\n"
+            f"\t-Loss Hinge: {epoch_loss_hinge}\n"
+        )
+
+        tmp_path = f"{poll_txt}.tmp"
+
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp_path, poll_txt)
+
+    def _clear_poll_txt(self, poll_txt):
+        if not poll_txt:
+            return
+
+        poll_dir = os.path.dirname(poll_txt)
+        if poll_dir:
+            os.makedirs(poll_dir, exist_ok=True)
+
+        try:
+            os.remove(poll_txt)
+        except FileNotFoundError:
+            pass
+
+    def train(self, train_dataloader, epochs, poll_txt=None):
+        self._clear_poll_txt(poll_txt)
+
         loss_D = []
         loss_G = []
         loss_G_gan = []
@@ -216,7 +309,8 @@ class AdvGAN_Attack:
             loss_adv_sum = 0.0
 
             for _, data in enumerate(train_dataloader, start=0):
-                images, labels = data
+                images, labels = unpack_images_labels(data)
+
                 images = images.to(self.device)
                 labels = labels.to(self.device)
 
@@ -256,6 +350,16 @@ class AdvGAN_Attack:
                     epoch_loss_G_gan,
                     epoch_loss_hinge
                 )
+            )
+
+            self._write_poll_txt(
+                poll_txt=poll_txt,
+                epoch=epoch,
+                epoch_loss_D=epoch_loss_D,
+                epoch_loss_G=epoch_loss_G,
+                epoch_loss_adv=epoch_loss_adv,
+                epoch_loss_G_gan=epoch_loss_G_gan,
+                epoch_loss_hinge=epoch_loss_hinge
             )
 
             loss_D.append(epoch_loss_D)

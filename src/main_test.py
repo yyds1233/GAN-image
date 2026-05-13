@@ -260,6 +260,126 @@ def maybe_save_npy(cfg, filename, array):
     np.save(os.path.join(npy_dir, filename), array)
 
 
+def safe_stem(filename):
+    """
+    将原始文件名转换为安全的文件名前缀：
+    - 去掉目录
+    - 去掉扩展名
+    - 非字母数字、点、下划线、短横线的字符替换为下划线
+    """
+    stem = Path(str(filename)).stem
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in stem)
+    return safe or "unknown"
+
+
+def unpack_batch(data, batch_index=None, need_filenames=False):
+    """
+    兼容两种 Dataset 返回格式：
+    1. img, true_label
+    2. img, true_label, filenames
+
+    如果 need_filenames=True 但 Dataset 没返回 filenames，则使用 fallback 名称。
+    """
+    if isinstance(data, (list, tuple)) and len(data) >= 3:
+        img = data[0]
+        true_label = data[1]
+        filenames = data[2]
+        return img, true_label, filenames
+
+    img, true_label = data
+
+    if need_filenames:
+        batch_size = img.shape[0]
+        filenames = [
+            f"example_{batch_index}_{j}"
+            for j in range(batch_size)
+        ]
+        return img, true_label, filenames
+
+    return img, true_label, None
+
+
+def build_ssim_kernel(window_size, sigma, channels, device, dtype):
+    coords = torch.arange(window_size, dtype=dtype, device=device)
+    coords = coords - window_size // 2
+
+    gaussian_1d = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+    gaussian_1d = gaussian_1d / gaussian_1d.sum()
+
+    gaussian_2d = torch.outer(gaussian_1d, gaussian_1d)
+    kernel = gaussian_2d.expand(channels, 1, window_size, window_size).contiguous()
+
+    return kernel
+
+
+def compute_ssim_tensor(img_a, img_b, data_range=1.0, window_size=11, sigma=1.5):
+    """
+    Compute SSIM between two image tensors.
+
+    Expected input:
+    - img_a: C x H x W, value range [0, 1]
+    - img_b: C x H x W, value range [0, 1]
+
+    Returns:
+    - Python float
+    """
+    if img_a.shape != img_b.shape:
+        raise ValueError(
+            f"SSIM input shape mismatch: {tuple(img_a.shape)} vs {tuple(img_b.shape)}"
+        )
+
+    if img_a.dim() != 3:
+        raise ValueError(
+            f"SSIM expects C x H x W tensor, got shape: {tuple(img_a.shape)}"
+        )
+
+    img_a = img_a.detach().float().unsqueeze(0)
+    img_b = img_b.detach().float().unsqueeze(0)
+
+    channels = img_a.shape[1]
+    device = img_a.device
+    dtype = img_a.dtype
+
+    kernel = build_ssim_kernel(
+        window_size=window_size,
+        sigma=sigma,
+        channels=channels,
+        device=device,
+        dtype=dtype
+    )
+
+    padding = window_size // 2
+
+    mu_a = F.conv2d(img_a, kernel, padding=padding, groups=channels)
+    mu_b = F.conv2d(img_b, kernel, padding=padding, groups=channels)
+
+    mu_a_sq = mu_a.pow(2)
+    mu_b_sq = mu_b.pow(2)
+    mu_ab = mu_a * mu_b
+
+    sigma_a_sq = (
+        F.conv2d(img_a * img_a, kernel, padding=padding, groups=channels)
+        - mu_a_sq
+    )
+    sigma_b_sq = (
+        F.conv2d(img_b * img_b, kernel, padding=padding, groups=channels)
+        - mu_b_sq
+    )
+    sigma_ab = (
+        F.conv2d(img_a * img_b, kernel, padding=padding, groups=channels)
+        - mu_ab
+    )
+
+    c1 = (0.01 * data_range) ** 2
+    c2 = (0.03 * data_range) ** 2
+
+    ssim_map = ((2 * mu_ab + c1) * (2 * sigma_ab + c2)) / (
+        (mu_a_sq + mu_b_sq + c1) * (sigma_a_sq + sigma_b_sq + c2)
+    )
+
+    return float(ssim_map.mean().detach().cpu().item())
+
+
 def test_clean_performance(cfg, dataloader, target_model, dataset_size, device, mode="train"):
     target = cfg["target_dataset"]
 
@@ -271,7 +391,8 @@ def test_clean_performance(cfg, dataloader, target_model, dataset_size, device, 
 
     with torch.no_grad():
         for _, data in enumerate(dataloader, 0):
-            img, true_label = data
+            img, true_label, _ = unpack_batch(data, need_filenames=False)
+
             img = img.to(device)
             true_label = true_label.to(device)
 
@@ -314,6 +435,9 @@ def test_attack_performance(
 
     os.makedirs(adv_image_dir, exist_ok=True)
 
+    ssim_txt_path = os.path.join(adv_image_dir, "ssim.txt")
+    ssim_lines = []
+
     n_correct = 0
     true_labels = []
     pred_labels = []
@@ -330,7 +454,12 @@ def test_attack_performance(
 
     with torch.no_grad():
         for i, data in enumerate(dataloader, 0):
-            img, true_label = data
+            img, true_label, filenames = unpack_batch(
+                data,
+                batch_index=i,
+                need_filenames=True
+            )
+
             img = img.to(device)
             true_label = true_label.to(device)
 
@@ -360,24 +489,49 @@ def test_attack_performance(
             true_label_cpu = true_label.detach().cpu().numpy()
             pred_label_cpu = pred_label.detach().cpu().numpy()
 
-            print(f"Saving images for batch {i + 1} out of {len(dataloader)}")
+            print(f"Saving images and SSIM for batch {i + 1} out of {len(dataloader)}")
 
             for j in range(adv_img.shape[0]):
                 true_idx = int(true_label_cpu[j])
                 pred_idx = int(pred_label_cpu[j])
 
                 if target == "HighResolution":
+                    saved_orig = inv_norm(img[j].detach().clone())
+                    saved_orig = torch.clamp(saved_orig, 0, 1)
+
                     saved_adv = inv_norm(adv_img[j].detach().clone())
                     saved_adv = torch.clamp(saved_adv, 0, 1)
                 else:
-                    saved_adv = adv_img[j].detach()
+                    saved_orig = torch.clamp(img[j].detach().clone(), 0, 1)
+                    saved_adv = torch.clamp(adv_img[j].detach().clone(), 0, 1)
+
+                orig_name = safe_stem(filenames[j])
+
+                # pred_idx 是模型输出的 0-based ImageNet 类别索引。
+                # CSV / 原始 ImageNet 标签是 1-based，所以保存到文件名时加 1。
+                pred_idx_for_name = pred_idx + 1
+
+                adv_filename = f"Adv_{orig_name}_{pred_idx_for_name}.png"
 
                 save_path = os.path.join(
                     adv_image_dir,
-                    f"example_{i}_{j}_true_{true_idx}_pred_{pred_idx}.png"
+                    adv_filename
                 )
 
                 save_image(saved_adv, save_path)
+
+                ssim_value = compute_ssim_tensor(
+                    saved_orig,
+                    saved_adv,
+                    data_range=1.0
+                )
+
+                ssim_lines.append(f"{adv_filename} {ssim_value:.6f}\n")
+
+    with open(ssim_txt_path, "w", encoding="utf-8") as f:
+        f.writelines(ssim_lines)
+
+    print(f"SSIM txt saved to: {ssim_txt_path}")
 
     true_labels = np.concatenate(true_labels, axis=0)
     pred_labels = np.concatenate(pred_labels, axis=0)
@@ -527,9 +681,17 @@ def main():
         loss_dir=cfg["loss_dir"]
     )
 
+    poll_txt = os.path.join(
+        os.path.dirname(cfg["eval_txt"]),
+        f"poll_{cfg['mission_id']}.txt"
+    )
+
+    print(f"Poll txt path: {poll_txt}")
+
     losses = advGAN.train(
         train_dataloader=dataloader,
-        epochs=int(cfg["AdvGAN_epochs"])
+        epochs=int(cfg["AdvGAN_epochs"]),
+        poll_txt=poll_txt
     )
 
     print("\nLOADING TRAINED ADVGAN...")
@@ -578,7 +740,9 @@ def main():
     print("Full Dataset Adv Accuracy: {:.2f}%".format(100 * adv_correct / dataset_size))
     print("Accuracy Drop: {:.2f}%".format(100 * (clean_correct - adv_correct) / dataset_size))
     print(f"Adversarial images saved to: {cfg['adv_image_dir']}")
+    print(f"SSIM txt saved to: {os.path.join(cfg['adv_image_dir'], 'ssim.txt')}")
     print(f"Evaluation txt saved to: {cfg['eval_txt']}")
+    print(f"Poll txt saved to: {poll_txt}")
 
 
 if __name__ == "__main__":

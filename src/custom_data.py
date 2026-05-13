@@ -63,7 +63,8 @@ class HighResolutionDataset(Dataset):
         # 原项目注释说明：该数据集 TrueLabel 比 ImageNet 索引大 1
         true_label = int(img_df["TrueLabel"].iloc[0]) - 1
 
-        return tensor_image, true_label
+        # 返回 img_file，让 main_test.py 可以用原始文件名保存对抗样本
+        return tensor_image, true_label, img_file
 
 
 def split_dataset(dataset, test_size=.1, shuffle=True):
