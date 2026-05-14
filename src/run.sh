@@ -3,10 +3,18 @@ set -euo pipefail
 
 usage() {
   echo "Usage:"
-  echo "  bash run.sh <mission_id> [advgan_epochs] [l_inf_bound] [advgan_lr] [timeout_sec] [model_name]"
+  echo "  bash run.sh <mission_id> [model_name] [seed] [weight] [advgan_epochs] [l_inf_bound] [advgan_lr] [timeout_sec]"
   echo ""
-  echo "Example:"
-  echo "  bash run.sh mission001 15 0.05 0.001 3600 inception_v3"
+  echo "Examples:"
+  echo "  bash run.sh mission001"
+  echo "  bash run.sh mission001 inception_v3 None None 15 0.05 0.001 3600"
+  echo "  bash run.sh mission001 inception_v3 mission001 mission001 15 0.05 0.001 3600"
+  echo ""
+  echo "Arguments:"
+  echo "  seed=None    -> use /app/src/test_dataset"
+  echo "  seed!=None   -> use /app/seed/<seed>.zip"
+  echo "  weight=None  -> use /app/weight/inception_v3_google-0cc3c7bd(.pth/.pt)"
+  echo "  weight!=None -> use /app/weight/<weight>.zip"
 }
 
 json_response() {
@@ -33,15 +41,7 @@ PY
   else
     message="${message//\\/\\\\}"
     message="${message//\"/\\\"}"
-    cat <<EOF
-{
-    "code": ${code},
-    "message": "${message}",
-    "data": {
-        "status": "${status}"
-    }
-}
-EOF
+    printf '{"code":%s,"message":"%s","data":{"status":"%s"}}\n' "${code}" "${message}" "${status}"
   fi
 }
 
@@ -64,17 +64,46 @@ is_positive_number() {
   awk -v n="$1" 'BEGIN { exit !(n > 0) }'
 }
 
+is_none_arg() {
+  local value="${1:-}"
+  value="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
+  [ "${value}" = "none" ] || [ -z "${value}" ]
+}
+
+validate_safe_token() {
+  local name="$1"
+  local value="$2"
+
+  if ! [[ "${value}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    fail_json "invalid ${name} '${value}'. Allowed characters: A-Z a-z 0-9 _ . -"
+  fi
+}
+
 validate_args() {
   if [ "$#" -lt 1 ]; then
     fail_json "missing required argument mission_id. $(usage | tr '\n' ' ')"
   fi
 
-  if [ "$#" -gt 6 ]; then
+  if [ "$#" -gt 8 ]; then
     fail_json "too many arguments. $(usage | tr '\n' ' ')"
   fi
 
-  if ! [[ "${mission_id}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
-    fail_json "invalid mission_id '${mission_id}'. Allowed characters: A-Z a-z 0-9 _ . -"
+  validate_safe_token "mission_id" "${mission_id}"
+
+  case "${model_name}" in
+    "inception_v3"|"inception"|"resnet50"|"resnet"|"vgg16"|"vgg19")
+      ;;
+    *)
+      fail_json "invalid model_name '${model_name}'. Supported: inception_v3, inception, resnet50, resnet, vgg16, vgg19"
+      ;;
+  esac
+
+  if ! is_none_arg "${seed_arg}"; then
+    validate_safe_token "seed" "${seed_arg}"
+  fi
+
+  if ! is_none_arg "${weight_arg}"; then
+    validate_safe_token "weight" "${weight_arg}"
   fi
 
   if ! is_positive_int "${advgan_epochs}"; then
@@ -92,14 +121,6 @@ validate_args() {
   if ! is_positive_int "${timeout_sec}"; then
     fail_json "timeout_sec must be a positive integer, got '${timeout_sec}'"
   fi
-
-  case "${model_name}" in
-    "inception_v3"|"inception"|"resnet50"|"resnet"|"vgg16"|"vgg19")
-      ;;
-    *)
-      fail_json "invalid model_name '${model_name}'. Supported: inception_v3, inception, resnet50, resnet, vgg16, vgg19"
-      ;;
-  esac
 }
 
 require_command() {
@@ -152,42 +173,107 @@ wait_for_file() {
   return 0
 }
 
-worker_main() {
-  trap cleanup EXIT
+zip_path_from_arg() {
+  local root="$1"
+  local value="$2"
 
-  echo "Mission ${mission_id} accepted."
-  echo "Shell PID: $$"
-  echo "Run ID: ${RUN_ID}"
-  echo "Work directory: ${WORK_DIR}"
+  if [[ "${value}" == *.zip ]]; then
+    printf '%s/%s\n' "${root}" "${value}"
+  else
+    printf '%s/%s.zip\n' "${root}" "${value}"
+  fi
+}
 
-  rm -f "${TAR_PATH}"
-  rm -f "${EVAL_TXT}"
+find_dataset_files() {
+  local dataset_root="$1"
 
-  echo "Waiting for seed zip: ${SEED_ZIP}"
-  wait_for_file "${SEED_ZIP}" 600
-
-  echo "Extracting seed zip..."
-  unzip -q "${SEED_ZIP}" -d "${SEED_EXTRACT_DIR}"
-
-  IMAGE_DIR="$(find "${SEED_EXTRACT_DIR}" -type d -name "img" | head -n 1 || true)"
-  LABEL_CSV="$(find "${SEED_EXTRACT_DIR}" -type f -name "images.csv" | head -n 1 || true)"
+  IMAGE_DIR="$(find "${dataset_root}" -type d -name "img" | head -n 1 || true)"
+  LABEL_CSV="$(find "${dataset_root}" -type f -name "images.csv" | head -n 1 || true)"
 
   if [ -z "${IMAGE_DIR}" ] || [ ! -d "${IMAGE_DIR}" ]; then
-    echo "Image directory 'img' not found after extracting ${SEED_ZIP}"
+    echo "Image directory 'img' not found under ${dataset_root}"
     exit 1
   fi
 
   if [ -z "${LABEL_CSV}" ] || [ ! -f "${LABEL_CSV}" ]; then
-    echo "Label file 'images.csv' not found after extracting ${SEED_ZIP}"
+    echo "Label file 'images.csv' not found under ${dataset_root}"
     exit 1
   fi
 
   echo "Image dir: ${IMAGE_DIR}"
   echo "Label CSV: ${LABEL_CSV}"
+}
 
+prepare_seed() {
+  if is_none_arg "${seed_arg}"; then
+    echo "Seed argument is None."
+    echo "Using default dataset: ${DEFAULT_SEED_DIR}"
+
+    if [ ! -d "${DEFAULT_SEED_DIR}" ]; then
+      echo "Default dataset directory not found: ${DEFAULT_SEED_DIR}"
+      exit 1
+    fi
+
+    find_dataset_files "${DEFAULT_SEED_DIR}"
+  else
+    SEED_ZIP="$(zip_path_from_arg "${SEED_ROOT}" "${seed_arg}")"
+
+    echo "Waiting for seed zip: ${SEED_ZIP}"
+    wait_for_file "${SEED_ZIP}" 600
+
+    echo "Extracting seed zip..."
+    unzip -q "${SEED_ZIP}" -d "${SEED_EXTRACT_DIR}"
+
+    find_dataset_files "${SEED_EXTRACT_DIR}"
+  fi
+}
+
+resolve_default_weight_path() {
+  local p
+
+  for p in \
+    "${DEFAULT_WEIGHT_STEM}" \
+    "${DEFAULT_WEIGHT_STEM}.pth" \
+    "${DEFAULT_WEIGHT_STEM}.pt"
+  do
+    if [ -f "${p}" ]; then
+      printf '%s\n' "${p}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+prepare_weight() {
   TARGET_WEIGHT_PATH=""
 
-  if [ -f "${WEIGHT_ZIP}" ]; then
+  if is_none_arg "${weight_arg}"; then
+    echo "Weight argument is None."
+    echo "Using default local weight: ${DEFAULT_WEIGHT_STEM}(.pth/.pt)"
+
+    if [ "${CANONICAL_MODEL_NAME}" != "inception_v3" ]; then
+      echo "Default local weight is for inception_v3, but model_name is ${CANONICAL_MODEL_NAME}."
+      echo "Please provide a matching weight zip when using non-inception_v3 model."
+      exit 1
+    fi
+
+    if ! TARGET_WEIGHT_PATH="$(resolve_default_weight_path)"; then
+      echo "Default weight file not found."
+      echo "Tried:"
+      echo "  ${DEFAULT_WEIGHT_STEM}"
+      echo "  ${DEFAULT_WEIGHT_STEM}.pth"
+      echo "  ${DEFAULT_WEIGHT_STEM}.pt"
+      exit 1
+    fi
+
+    echo "Target weight: ${TARGET_WEIGHT_PATH}"
+  else
+    WEIGHT_ZIP="$(zip_path_from_arg "${WEIGHT_ROOT}" "${weight_arg}")"
+
+    echo "Waiting for weight zip: ${WEIGHT_ZIP}"
+    wait_for_file "${WEIGHT_ZIP}" 600
+
     echo "Extracting weight zip: ${WEIGHT_ZIP}"
     unzip -q "${WEIGHT_ZIP}" -d "${WEIGHT_EXTRACT_DIR}"
 
@@ -199,10 +285,22 @@ worker_main() {
     fi
 
     echo "Target weight: ${TARGET_WEIGHT_PATH}"
-  else
-    echo "Weight zip not found: ${WEIGHT_ZIP}"
-    echo "Will use torchvision DEFAULT pretrained weight for ${CANONICAL_MODEL_NAME}."
   fi
+}
+
+worker_main() {
+  trap cleanup EXIT
+
+  echo "Mission ${mission_id} accepted."
+  echo "Shell PID: $$"
+  echo "Run ID: ${RUN_ID}"
+  echo "Work directory: ${WORK_DIR}"
+
+  rm -f "${TAR_PATH}"
+  rm -f "${EVAL_TXT}"
+
+  prepare_seed
+  prepare_weight
 
   echo "Generating mission config: ${CONFIG_PATH}"
 
@@ -337,21 +435,19 @@ cleanup() {
   rm -f "${PID_FILE}"
   rm -f "${TMP_TAR_PATH}"
 
-  # if [ "${status}" -eq 0 ]; then
-  #   rm -rf "${WORK_DIR}"
-  # else
-  #   echo "Mission failed. Work directory kept for debugging: ${WORK_DIR}"
-  # fi
+  echo "Work directory kept: ${WORK_DIR}"
 
   exit "${status}"
 }
 
 mission_id="${1:-}"
-advgan_epochs="${2:-15}"
-l_inf_bound="${3:-0.05}"
-advgan_lr="${4:-0.001}"
-timeout_sec="${5:-3600}"
-model_name="${6:-inception_v3}"
+model_name="${2:-inception_v3}"
+seed_arg="${3:-None}"
+weight_arg="${4:-None}"
+advgan_epochs="${5:-15}"
+l_inf_bound="${6:-0.05}"
+advgan_lr="${7:-0.001}"
+timeout_sec="${8:-3600}"
 
 APP_DIR="/app"
 SRC_DIR="${APP_DIR}/src"
@@ -361,6 +457,9 @@ WEIGHT_ROOT="${APP_DIR}/weight"
 WORK_ROOT="${APP_DIR}/work"
 ADV_SAMPLE_DIR="${APP_DIR}/adv_sample"
 ADV_EVAL_DIR="${APP_DIR}/adv_eval"
+
+DEFAULT_SEED_DIR="${SRC_DIR}/test_dataset"
+DEFAULT_WEIGHT_STEM="${WEIGHT_ROOT}/inception_v3_google-0cc3c7bd"
 
 validate_args "$@"
 
@@ -377,8 +476,8 @@ OUTPUT_DIR_NAME="${OUTPUT_BASENAME}"
 RUN_ID="${mission_id}_$(date +%Y%m%d%H%M%S)_$$"
 WORK_DIR="${WORK_ROOT}/${RUN_ID}"
 
-SEED_ZIP="${SEED_ROOT}/${mission_id}.zip"
-WEIGHT_ZIP="${WEIGHT_ROOT}/${mission_id}.zip"
+SEED_ZIP=""
+WEIGHT_ZIP=""
 
 SEED_EXTRACT_DIR="${WORK_DIR}/seed"
 WEIGHT_EXTRACT_DIR="${WORK_DIR}/weight"
