@@ -57,7 +57,6 @@ json_success_done() {
     \"message\": \"查询成功\",
     \"data\": {
         \"ACC\": \"$acc\",
-        \"download_result_addr\": \"$download_result_addr\",
         \"status\": \"2\"
     }
 }"
