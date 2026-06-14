@@ -1,0 +1,4 @@
+./run.sh '{"mission_id":"202605141027","model_name":"Inception_v3","model_class":"image","method":"AdvGan","epoch":20}'
+./run_poll.sh '{"mission_id":"202605141027"}'
+./acc.sh '{"mission_id":"202605141027","model_name":"Inception_v3","model_class":"image","method":"ACC"}'
+./acc_poll.sh '{"mission_id":"202605141027"}'

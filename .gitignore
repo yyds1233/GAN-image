@@ -8,4 +8,7 @@ src/core
 adv_eval/
 adv_sample/
 work/
+ACC_result/
+run_logs/
+
 
