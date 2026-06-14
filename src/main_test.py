@@ -33,10 +33,8 @@ def parse_args():
 def str_to_bool(value):
     if isinstance(value, bool):
         return value
-
     if isinstance(value, str):
         return value.lower() in ("true", "1", "yes", "y")
-
     return bool(value)
 
 
@@ -121,7 +119,6 @@ def load_weight_if_needed(model, weight_path, device):
 
     checkpoint = torch.load(weight_path, map_location=device)
     state_dict = normalize_state_dict(checkpoint)
-
     result = model.load_state_dict(state_dict, strict=False)
 
     print(f"Loaded target weight: {weight_path}")
@@ -150,7 +147,6 @@ def build_target_model(model_name, weight_path, device):
             model = tv_models.inception_v3(weights="DEFAULT")
         input_size = 299
         canonical_name = "inception_v3"
-
     elif model_name in ("resnet", "resnet50"):
         if weight_path:
             model = tv_models.resnet50(weights=None)
@@ -158,7 +154,6 @@ def build_target_model(model_name, weight_path, device):
             model = tv_models.resnet50(weights="DEFAULT")
         input_size = 224
         canonical_name = "resnet50"
-
     elif model_name == "vgg16":
         if weight_path:
             model = tv_models.vgg16(weights=None)
@@ -166,7 +161,6 @@ def build_target_model(model_name, weight_path, device):
             model = tv_models.vgg16(weights="DEFAULT")
         input_size = 224
         canonical_name = "vgg16"
-
     elif model_name == "vgg19":
         if weight_path:
             model = tv_models.vgg19(weights=None)
@@ -174,7 +168,6 @@ def build_target_model(model_name, weight_path, device):
             model = tv_models.vgg19(weights="DEFAULT")
         input_size = 224
         canonical_name = "vgg19"
-
     else:
         raise NotImplementedError(
             f"Unsupported target_model_name: {model_name}. "
@@ -190,7 +183,6 @@ def build_target_model(model_name, weight_path, device):
 
 def init_params(cfg, device):
     target = cfg["target_dataset"]
-
     if target != "HighResolution":
         raise NotImplementedError(
             "This engineering version currently supports HighResolution missions. "
@@ -382,7 +374,6 @@ def compute_ssim_tensor(img_a, img_b, data_range=1.0, window_size=11, sigma=1.5)
 
 def test_clean_performance(cfg, dataloader, target_model, dataset_size, device, mode="train"):
     target = cfg["target_dataset"]
-
     n_correct = 0
     true_labels = []
     pred_labels = []
@@ -392,7 +383,6 @@ def test_clean_performance(cfg, dataloader, target_model, dataset_size, device, 
     with torch.no_grad():
         for _, data in enumerate(dataloader, 0):
             img, true_label, _ = unpack_batch(data, need_filenames=False)
-
             img = img.to(device)
             true_label = true_label.to(device)
 
@@ -432,11 +422,13 @@ def test_attack_performance(
 ):
     target = cfg["target_dataset"]
     adv_image_dir = cfg["adv_image_dir"]
-
     os.makedirs(adv_image_dir, exist_ok=True)
 
     ssim_txt_path = os.path.join(adv_image_dir, "ssim.txt")
+    value_txt_path = os.path.join(adv_image_dir, "value.txt")
+
     ssim_lines = []
+    value_lines = []
 
     n_correct = 0
     true_labels = []
@@ -477,6 +469,7 @@ def test_attack_performance(
             adv_img = torch.clamp(adv_img, 0, 1)
 
             pred_label = torch.argmax(target_model(adv_img), 1)
+
             n_correct += torch.sum(pred_label == true_label, 0).item()
 
             true_labels.append(true_label.detach().cpu().numpy())
@@ -489,7 +482,10 @@ def test_attack_performance(
             true_label_cpu = true_label.detach().cpu().numpy()
             pred_label_cpu = pred_label.detach().cpu().numpy()
 
-            print(f"Saving images and SSIM for batch {i + 1} out of {len(dataloader)}")
+            print(
+                f"Saving images, SSIM and value.txt labels "
+                f"for batch {i + 1} out of {len(dataloader)}"
+            )
 
             for j in range(adv_img.shape[0]):
                 true_idx = int(true_label_cpu[j])
@@ -512,11 +508,7 @@ def test_attack_performance(
                 pred_idx_for_name = pred_idx + 1
 
                 adv_filename = f"Adv_{orig_name}_{pred_idx_for_name}.png"
-
-                save_path = os.path.join(
-                    adv_image_dir,
-                    adv_filename
-                )
+                save_path = os.path.join(adv_image_dir, adv_filename)
 
                 save_image(saved_adv, save_path)
 
@@ -528,10 +520,19 @@ def test_attack_performance(
 
                 ssim_lines.append(f"{adv_filename} {ssim_value:.6f}\n")
 
+                # custom_data.py 里已经把 CSV 的 TrueLabel 减 1，变成模型推理用的 0-based 标签。
+                # value.txt 需要写真实标签，为了和原始 images.csv 保持一致，这里恢复成 1-based。
+                true_label_for_value = true_idx + 1
+                value_lines.append(f"{adv_filename} {true_label_for_value}\n")
+
     with open(ssim_txt_path, "w", encoding="utf-8") as f:
         f.writelines(ssim_lines)
 
+    with open(value_txt_path, "w", encoding="utf-8") as f:
+        f.writelines(value_lines)
+
     print(f"SSIM txt saved to: {ssim_txt_path}")
+    print(f"Value txt saved to: {value_txt_path}")
 
     true_labels = np.concatenate(true_labels, axis=0)
     pred_labels = np.concatenate(pred_labels, axis=0)
@@ -542,6 +543,7 @@ def test_attack_performance(
     if cfg.get("save_npy", False) and len(img_np) > 0:
         img_np = np.concatenate(img_np, axis=0)
         adv_img_np = np.concatenate(adv_img_np, axis=0)
+
         maybe_save_npy(cfg, f"{mode}_img_np.npy", img_np)
         maybe_save_npy(cfg, f"{mode}_adv_img_np.npy", adv_img_np)
 
@@ -605,7 +607,6 @@ def write_eval_txt(
         f.write("\n")
 
         f.write("losses_by_epoch:\n")
-
         epoch_count = len(losses.get("loss_D", []))
         for idx in range(epoch_count):
             f.write(
@@ -685,7 +686,6 @@ def main():
         os.path.dirname(cfg["eval_txt"]),
         f"poll_{cfg['mission_id']}.txt"
     )
-
     print(f"Poll txt path: {poll_txt}")
 
     losses = advGAN.train(
@@ -709,7 +709,6 @@ def main():
         n_channels,
         cfg["target_dataset"]
     ).to(device)
-
     adv_GAN.load_state_dict(torch.load(adv_GAN_path, map_location=device))
     adv_GAN.eval()
 
@@ -741,6 +740,7 @@ def main():
     print("Accuracy Drop: {:.2f}%".format(100 * (clean_correct - adv_correct) / dataset_size))
     print(f"Adversarial images saved to: {cfg['adv_image_dir']}")
     print(f"SSIM txt saved to: {os.path.join(cfg['adv_image_dir'], 'ssim.txt')}")
+    print(f"Value txt saved to: {os.path.join(cfg['adv_image_dir'], 'value.txt')}")
     print(f"Evaluation txt saved to: {cfg['eval_txt']}")
     print(f"Poll txt saved to: {poll_txt}")
 
